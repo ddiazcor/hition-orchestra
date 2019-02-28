@@ -1048,16 +1048,16 @@ export class Xapi extends EventEmitter {
       // detect and fix desynchronized recods
       {
         const { objects } = this
-        const actual = this._counter
-        const expected = result.valid_ref_counts
+        const localCounts = this._counter
+        const xapiCounts = result.valid_ref_counts
         const lcToTypes = this._lcToTypes
         await Promise.all(
-          Object.keys(expected).map(async lcType => {
+          Object.keys(xapiCounts).map(async lcType => {
             let type = lcToTypes[lcType]
             if (type === undefined) {
               type = lcType
             }
-            if (actual[type] === expected[lcType]) {
+            if (localCounts[type] === xapiCounts[lcType]) {
               return
             }
             try {
