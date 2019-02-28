@@ -983,7 +983,18 @@ export class Xapi extends EventEmitter {
       }
     }
 
-    const types = this._watchedTypes || this._types
+    const IGNORED_TYPES = {
+      __proto__: null,
+      message: true,
+      role: true,
+      session: true,
+      user: true,
+      VBD_metrics: true,
+      VIF_metrics: true,
+    }
+
+    const types =
+      this._watchedTypes || this._types.filter(_ => !(_ in IGNORED_TYPES))
 
     // initial fetch
     const flush = this.objects.bufferEvents()
@@ -1057,7 +1068,10 @@ export class Xapi extends EventEmitter {
             if (type === undefined) {
               type = lcType
             }
-            if (localCounts[type] === xapiCounts[lcType]) {
+            if (
+              type in IGNORED_TYPES ||
+              localCounts[type] === xapiCounts[lcType]
+            ) {
               return
             }
             try {
