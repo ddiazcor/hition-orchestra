@@ -30,6 +30,7 @@ import {
   TimeoutError,
 } from 'promise-toolbox'
 
+import * as MultiCounter from './_MultiCounter'
 import autoTransport from './transports/auto'
 import replaceSensitiveValues from './_replaceSensitiveValues'
 
@@ -812,7 +813,7 @@ export class Xapi extends EventEmitter {
 
   _clearObjects() {
     ;(this._objectsByRef = createObject(null))[NULL_REF] = undefined
-    this._nTasks = 0
+    this._counter = MultiCounter.create()
     this._objects.clear()
     this.objectsFetched = new Promise(resolve => {
       this._resolveObjectsFetched = resolve
@@ -884,6 +885,10 @@ export class Xapi extends EventEmitter {
     this._objects.set(object)
     objectsByRef[ref] = object
 
+    if (prev === undefined) {
+      ++this._counter[type]
+    }
+
     if (type === 'pool') {
       this._pool = object
 
@@ -896,10 +901,6 @@ export class Xapi extends EventEmitter {
         }
       })
     } else if (type === 'task') {
-      if (prev === undefined) {
-        ++this._nTasks
-      }
-
       const taskWatchers = this._taskWatchers
       const taskWatcher = taskWatchers[ref]
       if (taskWatcher !== undefined) {
@@ -919,9 +920,7 @@ export class Xapi extends EventEmitter {
       this._objects.unset(object.$id)
       delete byRefs[ref]
 
-      if (type === 'task') {
-        --this._nTasks
-      }
+      --this._counter[type]
     }
 
     const taskWatchers = this._taskWatchers
@@ -1046,23 +1045,37 @@ export class Xapi extends EventEmitter {
       fromToken = result.token
       this._processEvents(result.events)
 
-      // detect and fix disappearing tasks (e.g. when toolstack restarts)
-      if (result.valid_ref_counts.task !== this._nTasks) {
-        await ignoreErrors.call(
-          this._sessionCall('task.get_all_records').then(tasks => {
-            const toRemove = new Set()
-            forOwn(this.objects.all, object => {
-              if (object.$type === 'task') {
-                toRemove.add(object.$ref)
-              }
-            })
-            forOwn(tasks, (task, ref) => {
-              toRemove.delete(ref)
-              this._addObject('task', ref, task)
-            })
-            toRemove.forEach(ref => {
-              this._removeObject('task', ref)
-            })
+      // detect and fix desynchronized recods
+      {
+        const { objects } = this
+        const actual = this._counter
+        const expected = result.valid_ref_counts
+        const lcToTypes = this._lcToTypes
+        await Promise.all(
+          Object.keys(expected).map(async lcType => {
+            let type = lcToTypes[lcType]
+            if (type === undefined) {
+              type = lcType
+            }
+            if (actual[type] === expected[lcType]) {
+              return
+            }
+            try {
+              const toRemove = new Set()
+              const records = await this._sessionCall(`${type}.get_all_records`)
+              forOwn(objects.all, object => {
+                if (object.$type === type) {
+                  toRemove.add(object.$ref)
+                }
+              })
+              forOwn(records, (record, ref) => {
+                toRemove.delete(ref)
+                this._addObject(type, ref, record)
+              })
+              toRemove.forEach(ref => {
+                this._removeObject(type, ref)
+              })
+            } catch (_) {}
           })
         )
       }
