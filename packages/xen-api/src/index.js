@@ -1056,7 +1056,7 @@ export class Xapi extends EventEmitter {
       fromToken = result.token
       this._processEvents(result.events)
 
-      // detect and fix desynchronized recods
+      // detect and fix desynchronized records
       {
         const { objects } = this
         const localCounts = this._counter
