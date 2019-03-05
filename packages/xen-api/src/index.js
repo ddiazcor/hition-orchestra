@@ -1061,17 +1061,16 @@ export class Xapi extends EventEmitter {
         const { objects } = this
         const localCounts = this._counter
         const xapiCounts = result.valid_ref_counts
-        const lcToTypes = this._lcToTypes
         await Promise.all(
-          Object.keys(xapiCounts).map(async lcType => {
-            let type = lcToTypes[lcType]
-            if (type === undefined) {
-              type = lcType
+          types.map(async type => {
+            // XAPI uses lowercased types in events, but this may change, so we
+            // handle both
+            let xapiCount = xapiCounts[type]
+            if (xapiCount === undefined) {
+              xapiCount = xapiCounts[type.toLowerCase()]
             }
-            if (
-              type in IGNORED_TYPES ||
-              localCounts[type] === xapiCounts[lcType]
-            ) {
+
+            if (localCounts[type] === xapiCount) {
               return
             }
             try {
