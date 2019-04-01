@@ -33,6 +33,7 @@ import {
   Ul,
 } from '../../utils'
 
+import ReportWhen from '../_reportWhen'
 import Schedules from '../_schedules'
 
 // A retention can be:
@@ -63,6 +64,20 @@ const getInitialState = () => ({
   showErrors: false,
 })
 
+const setSettingsDefaultRetentions = (settings, modes) =>
+  mapValues(settings, (setting, key) =>
+    key === ''
+      ? setting
+      : {
+          retentionPoolMetadata: modes.modePoolMetadata
+            ? defined(setting.retentionPoolMetadata, DEFAULT_RETENTION)
+            : undefined,
+          retentionXoMetadata: modes.modeXoMetadata
+            ? defined(setting.retentionXoMetadata, DEFAULT_RETENTION)
+            : undefined,
+        }
+  )
+
 export default decorate([
   New => props => (
     <Upgrade place='newMetadataBackup' required={3}>
@@ -80,28 +95,24 @@ export default decorate([
           return { showErrors: true }
         }
 
+        const {
+          modePoolMetadata,
+          modeXoMetadata,
+          name,
+          pools,
+          remotes,
+          schedules,
+        } = state
         await createMetadataBackupJob({
-          name: state.name,
-          pools: state.modePoolMetadata
-            ? constructPattern(state.pools)
-            : undefined,
-          remotes: constructPattern(state.remotes),
-          xoMetadata: state.modeXoMetadata,
-          schedules: mapValues(
-            state.schedules,
-            ({ id, ...schedule }) => schedule
-          ),
-          settings: mapValues(
-            state.settings,
-            ({ retentionPoolMetadata, retentionXoMetadata }) => ({
-              retentionPoolMetadata: state.modePoolMetadata
-                ? defined(retentionPoolMetadata, DEFAULT_RETENTION)
-                : undefined,
-              retentionXoMetadata: state.modeXoMetadata
-                ? defined(retentionXoMetadata, DEFAULT_RETENTION)
-                : undefined,
-            })
-          ),
+          name,
+          pools: modePoolMetadata ? constructPattern(pools) : undefined,
+          remotes: constructPattern(remotes),
+          xoMetadata: modeXoMetadata,
+          schedules: mapValues(schedules, ({ id, ...schedule }) => schedule),
+          settings: setSettingsDefaultRetentions(state.settings, {
+            modePoolMetadata,
+            modeXoMetadata,
+          }),
         })
       },
       editJob: () => async (state, props) => {
@@ -139,23 +150,17 @@ export default decorate([
           }),
         ])
 
+        const { modePoolMetadata, modeXoMetadata, name, pools, remotes } = state
         await editMetadataBackupJob({
           id: props.job.id,
-          name: state.name,
-          pools: state.modePoolMetadata ? constructPattern(state.pools) : null,
-          remotes: constructPattern(state.remotes),
-          xoMetadata: state.modeXoMetadata,
-          settings: mapValues(
-            settings,
-            ({ retentionPoolMetadata, retentionXoMetadata }) => ({
-              retentionPoolMetadata: state.modePoolMetadata
-                ? defined(retentionPoolMetadata, DEFAULT_RETENTION)
-                : undefined,
-              retentionXoMetadata: state.modeXoMetadata
-                ? defined(retentionXoMetadata, DEFAULT_RETENTION)
-                : undefined,
-            })
-          ),
+          name,
+          pools: modePoolMetadata ? constructPattern(pools) : null,
+          remotes: constructPattern(remotes),
+          xoMetadata: modeXoMetadata,
+          settings: setSettingsDefaultRetentions(settings, {
+            modePoolMetadata,
+            modeXoMetadata,
+          }),
         })
       },
 
@@ -170,6 +175,20 @@ export default decorate([
       setSettings: (_, _settings) => () => ({
         _settings,
       }),
+      setGlobalSettings: ({ setSettings }, name, value) => ({
+        settings = {},
+      }) => {
+        setSettings({
+          ...settings,
+          '': {
+            ...settings[''],
+            [name]: value,
+          },
+        })
+      },
+      setReportWhen({ setGlobalSettings }, { value }) {
+        setGlobalSettings('reportWhen', value)
+      },
       toggleMode: (_, { mode }) => state => ({
         [`_${mode}`]: !state[mode],
       }),
@@ -252,6 +271,8 @@ export default decorate([
       missingRetentionXoMetadata,
       missingSchedules,
     } = state.showErrors ? state : {}
+
+    const { reportWhen = 'failure' } = defined(() => state.settings[''], {})
 
     return (
       <form id={state.idForm}>
@@ -343,6 +364,15 @@ export default decorate([
                       </Ul>
                     </FormGroup>
                   )}
+                </CardBlock>
+              </Card>
+              <Card>
+                <CardHeader>{_('newBackupSettings')}</CardHeader>
+                <CardBlock>
+                  <ReportWhen
+                    onChange={effects.setReportWhen}
+                    value={reportWhen}
+                  />
                 </CardBlock>
               </Card>
             </Col>

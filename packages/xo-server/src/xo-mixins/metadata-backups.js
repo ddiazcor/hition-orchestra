@@ -25,9 +25,12 @@ const METADATA_BACKUP_JOB_TYPE = 'metadataBackup'
 
 const compareTimestamp = (a, b) => a.timestamp - b.timestamp
 
+type ReportWhen = 'always' | 'failure' | 'never'
+
 type Settings = {|
-  retentionXoMetadata?: number,
+  reportWhen?: ReportWhen,
   retentionPoolMetadata?: number,
+  retentionXoMetadata?: number,
 |}
 
 type MetadataBackupJob = {
@@ -76,7 +79,7 @@ const createSafeReaddir = (handler, methodName) => (path, options) =>
 //
 // Task logs emitted in a metadata backup execution:
 //
-// job.start
+// job.start(data: { reportWhen: ReportWhen })
 // ├─ task.start(data: { type: 'pool', id: string, pool: <Pool />, poolMaster: <Host /> })
 // │  └─ task.end
 // ├─ task.start(data: { type: 'xo' })

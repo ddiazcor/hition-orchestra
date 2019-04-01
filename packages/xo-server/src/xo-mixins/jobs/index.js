@@ -257,12 +257,12 @@ export default class Jobs {
     }
 
     let data
-    if (type === 'backup') {
+    if (type === 'backup' || type === 'metadataBackup') {
       // $FlowFixMe only defined for BackupJob
       const settings = job.settings['']
       data = {
         // $FlowFixMe only defined for BackupJob
-        mode: job.mode,
+        mode: type === 'backup' ? job.mode : undefined,
         reportWhen: (settings && settings.reportWhen) || 'failure',
       }
     }
