@@ -1376,7 +1376,7 @@ export const importVm = async (file, type = 'xva', data = undefined, sr) => {
   const { name } = file
 
   info(_('startVmImport'), name)
-  if (data && data.tables) {
+  if (data !== undefined && data.tables !== undefined) {
     for (const k in data.tables) {
       data.tables[k] = await data.tables[k]
     }
