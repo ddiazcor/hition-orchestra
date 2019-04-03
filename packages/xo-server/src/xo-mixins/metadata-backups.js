@@ -328,24 +328,20 @@ export default class metadataBackup {
           return
         }
 
-        await Promise.all(
-          files.map(async ({ executeBackup, dir, retention }) => {
-            await executeBackup(handler)
+        await asyncMap(files, async ({ executeBackup, dir, retention }) => {
+          await executeBackup(handler)
 
-            // deleting old backups
-            await handler.list(dir).then(list => {
-              list.sort()
-              list = list
-                .filter(timestampDir => timestampReg.test(timestampDir))
-                .slice(0, -retention)
-              return Promise.all(
-                list.map(timestampDir =>
-                  handler.rmtree(`${dir}/${timestampDir}`)
-                )
-              )
-            })
+          // deleting old backups
+          await handler.list(dir).then(list => {
+            list.sort()
+            list = list
+              .filter(timestampDir => timestampReg.test(timestampDir))
+              .slice(0, -retention)
+            return Promise.all(
+              list.map(timestampDir => handler.rmtree(`${dir}/${timestampDir}`))
+            )
           })
-        )
+        })
       }
     )
   }
