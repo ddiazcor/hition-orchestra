@@ -2,12 +2,13 @@
 import asyncMap from '@xen-orchestra/async-map'
 import createLogger from '@xen-orchestra/log'
 import defer from 'golike-defer'
-import { fromEvent, ignoreErrors } from 'promise-toolbox'
+import { fromEvent } from 'promise-toolbox'
 
 import debounceWithKey from '../_pDebounceWithKey'
 import parseDuration from '../_parseDuration'
 import { type Xapi } from '../xapi'
 import {
+  noop,
   safeDateFormat,
   serializeError,
   type SimpleIdPattern,
@@ -132,6 +133,279 @@ export default class metadataBackup {
     })
   }
 
+  async _backupXo({ job, schedule, runJobId, handlers, retention }) {
+    const app = this._app
+    const logger = this._logger
+    const timestampReg = /^\d{8}T\d{6}Z$/
+
+    const timestamp = Date.now()
+    const formattedTimestamp = safeDateFormat(timestamp)
+
+    const taskId = logger.notice(`Starting XO metadata backup. (${job.id})`, {
+      data: {
+        type: 'xo',
+      },
+      event: 'task.start',
+      parentId: runJobId,
+    })
+
+    try {
+      const xoMetadataDir = `${DIR_XO_CONFIG_BACKUPS}/${schedule.id}`
+      const dir = `${xoMetadataDir}/${formattedTimestamp}`
+
+      const data = JSON.stringify(await app.exportConfig(), null, 2)
+      const fileName = `${dir}/data.json`
+
+      const metadata = JSON.stringify(
+        {
+          jobId: job.id,
+          jobName: job.name,
+          scheduleId: schedule.id,
+          scheduleName: schedule.name,
+          timestamp,
+        },
+        null,
+        2
+      )
+      const metaDataFileName = `${dir}/metadata.json`
+
+      await asyncMap(
+        handlers,
+        defer(async ($defer, { handler, id }) => {
+          $defer.onFailure(() => handler.rmtree(dir))
+
+          const subTaskId = logger.notice(
+            `Starting XO metadata backup for the remote (${id}). (${job.id})`,
+            {
+              data: {
+                id,
+                type: 'remote',
+              },
+              event: 'task.start',
+              parentId: taskId,
+            }
+          )
+
+          try {
+            await asyncMap([
+              handler.outputFile(fileName, data),
+              handler.outputFile(metaDataFileName, metadata),
+            ])
+
+            // deleting old backups
+            await handler.list(dir).then(list => {
+              list.sort()
+              list = list
+                .filter(timestamp => timestampReg.test(timestamp))
+                .slice(0, -retention)
+              return Promise.all(
+                list.map(timestamp => {
+                  const backupDir = `${dir}/${timestamp}`
+                  return handler.rmtree(backupDir).catch(error => {
+                    logger.warning(`unable to delete the folder ${backupDir}`, {
+                      event: 'task.warning',
+                      taskId,
+                      data: {
+                        error,
+                      },
+                    })
+                  })
+                })
+              )
+            }, noop)
+
+            logger.notice(
+              `Backuping XO metadata for the remote (${id}) is a success. (${
+                job.id
+              })`,
+              {
+                event: 'task.end',
+                status: 'success',
+                subTaskId,
+              }
+            )
+          } catch (error) {
+            logger.error(
+              `Backuping XO metadata for the remote (${id}) has failed. (${
+                job.id
+              })`,
+              {
+                event: 'task.end',
+                result: serializeError(error),
+                status: 'failure',
+                taskId: subTaskId,
+              }
+            )
+            throw error
+          }
+        })
+      )
+
+      logger.notice(`Backuping XO metadata is a success. (${job.id})`, {
+        event: 'task.end',
+        status: 'success',
+        taskId,
+      })
+    } catch (error) {
+      logger.error(`Backuping XO metadata has failed. (${job.id})`, {
+        event: 'task.end',
+        result: serializeError(error),
+        status: 'failure',
+        taskId,
+      })
+      throw error
+    }
+  }
+
+  async _backupPool(
+    id,
+    { handlers, job, runJobId, schedule, cancelToken, retention }
+  ) {
+    const app = this._app
+    const logger = this._logger
+    const timestampReg = /^\d{8}T\d{6}Z$/
+
+    const timestamp = Date.now()
+    const formattedTimestamp = safeDateFormat(timestamp)
+
+    const xapi = this._app.getXapi(id)
+    const poolMaster = await xapi.getRecord('host', xapi.pool.master)
+
+    const taskId = logger.notice(
+      `Starting metadata backup for the pool (${id}). (${job.id})`,
+      {
+        data: {
+          id,
+          pool: xapi.pool,
+          poolMaster,
+          type: 'pool',
+        },
+        event: 'task.start',
+        parentId: runJobId,
+      }
+    )
+
+    const poolMetadataDir = `${DIR_XO_POOL_METADATA_BACKUPS}/${
+      schedule.id
+    }/${id}`
+    const dir = `${poolMetadataDir}/${formattedTimestamp}`
+
+    // TODO: export the metadata only once then split the stream between remotes
+    const stream = await app.getXapi(id).exportPoolMetadata(cancelToken)
+    const fileName = `${dir}/data`
+
+    const metadata = JSON.stringify(
+      {
+        jobId: job.id,
+        jobName: job.name,
+        pool: xapi.pool,
+        poolMaster,
+        scheduleId: schedule.id,
+        scheduleName: schedule.name,
+        timestamp,
+      },
+      null,
+      2
+    )
+    const metaDataFileName = `${dir}/metadata.json`
+
+    try {
+      await asyncMap(
+        handlers,
+        defer(async ($defer, { handler, id }) => {
+          $defer.onFailure(() => handler.rmtree(dir))
+
+          const subTaskId = logger.notice(
+            `Starting metadata backup for the pool (${id}) for the remote (${id}). (${
+              job.id
+            })`,
+            {
+              data: {
+                id,
+                type: 'remote',
+              },
+              event: 'task.start',
+              parentId: taskId,
+            }
+          )
+
+          try {
+            await asyncMap([
+              (async () => {
+                const outputStream = await handler.createOutputStream(fileName)
+                $defer.onFailure(() => outputStream.destroy())
+
+                // 'readable-stream/pipeline' not call the callback when an error throws
+                // from the readable stream
+                stream.pipe(outputStream)
+                return fromEvent(stream, 'end').catch(error => {
+                  if (error.message !== 'aborted') {
+                    throw error
+                  }
+                })
+              })(),
+              handler.outputFile(metaDataFileName, metadata),
+            ])
+
+            // deleting old backups
+            await handler.list(dir).then(list => {
+              list.sort()
+              list = list
+                .filter(timestamp => timestampReg.test(timestamp))
+                .slice(0, -retention)
+              return Promise.all(
+                list.map(timestamp => {
+                  const backupDir = `${dir}/${timestamp}`
+                  return handler.rmtree(backupDir).catch(error => {
+                    logger.warning(`unable to delete the folder ${backupDir}`, {
+                      event: 'task.warning',
+                      taskId,
+                      data: {
+                        error,
+                      },
+                    })
+                  })
+                })
+              )
+            }, noop)
+
+            logger.notice(
+              `Backuping pool metadata (${id}) for the remote (${id}) is a success. (${
+                job.id
+              })`,
+              {
+                event: 'task.end',
+                status: 'success',
+                subTaskId,
+              }
+            )
+          } catch (error) {
+            logger.error(
+              `Backuping pool metadata (${id}) for the remote (${id}) has failed. (${
+                job.id
+              })`,
+              {
+                event: 'task.end',
+                result: serializeError(error),
+                status: 'failure',
+                subTaskId,
+              }
+            )
+            throw error
+          }
+        })
+      )
+    } catch (error) {
+      logger.error(`Backuping pool metadata (${id}) has failed. (${job.id})`, {
+        event: 'task.end',
+        result: serializeError(error),
+        status: 'failure',
+        taskId,
+      })
+      throw error
+    }
+  }
+
   async _executor({
     cancelToken,
     job: job_,
@@ -155,195 +429,69 @@ export default class metadataBackup {
       throw new Error('no metadata mode found')
     }
 
-    const app = this._app
-    const { retentionXoMetadata, retentionPoolMetadata } =
+    const { retentionXoMetadata = 0, retentionPoolMetadata = 0 } =
       job?.settings[schedule.id] || {}
-
-    const timestamp = Date.now()
-    const formattedTimestamp = safeDateFormat(timestamp)
-    const commonMetadata = {
-      jobId: job.id,
-      jobName: job.name,
-      scheduleId: schedule.id,
-      scheduleName: schedule.name,
-      timestamp,
-    }
-
-    const files = []
-    if (job.xoMetadata && retentionXoMetadata > 0) {
-      const taskId = logger.notice(`Starting XO metadata backup. (${job.id})`, {
-        data: {
-          type: 'xo',
-        },
-        event: 'task.start',
-        parentId: runJobId,
-      })
-
-      const xoMetadataDir = `${DIR_XO_CONFIG_BACKUPS}/${schedule.id}`
-      const dir = `${xoMetadataDir}/${formattedTimestamp}`
-
-      const data = JSON.stringify(await app.exportConfig(), null, 2)
-      const fileName = `${dir}/data.json`
-
-      const metadata = JSON.stringify(commonMetadata, null, 2)
-      const metaDataFileName = `${dir}/metadata.json`
-
-      files.push({
-        executeBackup: defer(($defer, handler) => {
-          $defer.onFailure(() => handler.rmtree(dir))
-          return Promise.all([
-            handler.outputFile(fileName, data),
-            handler.outputFile(metaDataFileName, metadata),
-          ]).then(
-            result => {
-              logger.notice(`Backuping XO metadata is a success. (${job.id})`, {
-                event: 'task.end',
-                status: 'success',
-                taskId,
-              })
-              return result
-            },
-            error => {
-              logger.notice(`Backuping XO metadata has failed. (${job.id})`, {
-                event: 'task.end',
-                result: serializeError(error),
-                status: 'failure',
-                taskId,
-              })
-              throw error
-            }
-          )
-        }),
-        dir: xoMetadataDir,
-        retention: retentionXoMetadata,
-      })
-    }
-    if (!isEmptyPools && retentionPoolMetadata > 0) {
-      files.push(
-        ...(await Promise.all(
-          poolIds.map(async id => {
-            const xapi = this._app.getXapi(id)
-            const poolMaster = await xapi.getRecord('host', xapi.pool.master)
-            const taskId = logger.notice(
-              `Starting metadata backup for the pool (${id}). (${job.id})`,
-              {
-                data: {
-                  id,
-                  pool: xapi.pool,
-                  poolMaster,
-                  type: 'pool',
-                },
-                event: 'task.start',
-                parentId: runJobId,
-              }
-            )
-            const poolMetadataDir = `${DIR_XO_POOL_METADATA_BACKUPS}/${
-              schedule.id
-            }/${id}`
-            const dir = `${poolMetadataDir}/${formattedTimestamp}`
-
-            // TODO: export the metadata only once then split the stream between remotes
-            const stream = await app.getXapi(id).exportPoolMetadata(cancelToken)
-            const fileName = `${dir}/data`
-
-            const metadata = JSON.stringify(
-              {
-                ...commonMetadata,
-                pool: xapi.pool,
-                poolMaster,
-              },
-              null,
-              2
-            )
-            const metaDataFileName = `${dir}/metadata.json`
-
-            return {
-              executeBackup: defer(($defer, handler) => {
-                $defer.onFailure(() => handler.rmtree(dir))
-                return Promise.all([
-                  (async () => {
-                    const outputStream = await handler.createOutputStream(
-                      fileName
-                    )
-                    $defer.onFailure(() => outputStream.destroy())
-
-                    // 'readable-stream/pipeline' not call the callback when an error throws
-                    // from the readable stream
-                    stream.pipe(outputStream)
-                    return fromEvent(stream, 'end').catch(error => {
-                      if (error.message !== 'aborted') {
-                        throw error
-                      }
-                    })
-                  })(),
-                  handler.outputFile(metaDataFileName, metadata),
-                ]).then(
-                  result => {
-                    logger.notice(
-                      `Backuping pool metadata (${id}) is a success. (${
-                        job.id
-                      })`,
-                      {
-                        event: 'task.end',
-                        status: 'success',
-                        taskId,
-                      }
-                    )
-                    return result
-                  },
-                  error => {
-                    logger.notice(
-                      `Backuping pool metadata (${id}) has failed. (${job.id})`,
-                      {
-                        event: 'task.end',
-                        result: serializeError(error),
-                        status: 'failure',
-                        taskId,
-                      }
-                    )
-                    throw error
-                  }
-                )
-              }),
-              dir: poolMetadataDir,
-              retention: retentionPoolMetadata,
-            }
-          })
-        ))
-      )
-    }
-
-    if (files.length === 0) {
+    if (
+      (!job.xoMetadata && retentionPoolMetadata === 0) ||
+      (isEmptyPools && retentionXoMetadata === 0)
+    ) {
       throw new Error('no retentions corresponding to the metadata modes found')
     }
 
     cancelToken.throwIfRequested()
 
-    const timestampReg = /^\d{8}T\d{6}Z$/
-    return asyncMap(
-      // TODO: emit a warning task if a remote is broken
-      asyncMap(remoteIds, id => app.getRemoteHandler(id)::ignoreErrors()),
-      async handler => {
-        if (handler === undefined) {
-          return
-        }
-
-        await asyncMap(files, async ({ executeBackup, dir, retention }) => {
-          await executeBackup(handler)
-
-          // deleting old backups
-          await handler.list(dir).then(list => {
-            list.sort()
-            list = list
-              .filter(timestampDir => timestampReg.test(timestampDir))
-              .slice(0, -retention)
-            return Promise.all(
-              list.map(timestampDir => handler.rmtree(`${dir}/${timestampDir}`))
-            )
+    const app = this._app
+    let handlers = await Promise.all(
+      remoteIds.map(async id => {
+        // TOTEST
+        const handler = await app.getRemoteHandler(id).catch(error => {
+          logger.warning(`unable to get the handler for the remote ${id}`, {
+            event: 'task.warning',
+            taskId: runJobId,
+            data: {
+              error,
+            },
           })
         })
-      }
+        return (
+          handler && {
+            id,
+            handler,
+          }
+        )
+      })
     )
+    handlers = handlers.filter(_ => _ !== undefined)
+
+    const promises = []
+    if (job.xoMetadata && retentionXoMetadata !== 0) {
+      promises.push(
+        this._backupXo({
+          handlers,
+          job,
+          retention: retentionXoMetadata,
+          runJobId,
+          schedule,
+        })
+      )
+    }
+
+    if (!isEmptyPools && retentionPoolMetadata > 0) {
+      poolIds.forEach(id => {
+        promises.push(
+          this._backupPool(id, {
+            cancelToken,
+            handlers,
+            job,
+            retention: retentionPoolMetadata,
+            runJobId,
+            schedule,
+          })
+        )
+      })
+    }
+
+    return asyncMap(promises)
   }
 
   async createMetadataBackupJob(
